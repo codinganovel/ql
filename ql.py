@@ -76,6 +76,10 @@ class QLLauncher:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.config_dir / '.qlcom'
         self.stats_file = self.config_dir / '.qlstats'
+        
+        # Clean up any leftover scripts from previous sessions
+        self.cleanup_old_scripts()
+        
         self.commands = self.load_commands()
         self.stats = self.load_stats()
         self.selected_index = 0
@@ -84,8 +88,8 @@ class QLLauncher:
         self.filter_mode = False
         self.filter_text = ""
         self.filtered_commands = []
-        self.first_run = True
         self.show_preview = True
+        self.first_run = True
         
         # Dangerous command patterns
         self.dangerous_patterns = [
@@ -274,8 +278,18 @@ class QLLauncher:
         return response == 'y'
     
     def clear_screen(self):
-        """Clear the terminal screen"""
-        os.system('clear' if os.name == 'posix' else 'cls')
+        """Clear the terminal screen completely"""
+        # More thorough screen clearing
+        if os.name == 'posix':
+            # Clear screen and move cursor to top-left
+            print('\033[2J\033[H', end='', flush=True)
+            # Also clear scrollback buffer on some terminals
+            print('\033[3J', end='', flush=True)
+        else:
+            os.system('cls')
+        
+        # Reset any terminal formatting
+        print('\033[0m', end='', flush=True)
     
     def get_key(self):
         """Get a single keypress from terminal with cross-platform support"""
@@ -638,6 +652,13 @@ class QLLauncher:
             else:
                 self.import_commands(parts[1])
                 input("\033[90mPress Enter to continue...\033[0m")
+        elif command == 'cleanup':
+            cleaned = self.force_cleanup_all_scripts()
+            if cleaned > 0:
+                print(f"\033[92m✅ Cleaned up {cleaned} temporary script(s)\033[0m")
+            else:
+                print("\033[90m✨ No temporary scripts to clean\033[0m")
+            input("\033[90mPress Enter to continue...\033[0m")
         else:
             # Try to run as a command alias
             if command in self.commands:
@@ -651,53 +672,102 @@ class QLLauncher:
     
     def cleanup_old_scripts(self):
         """Clean up any leftover QL temp scripts"""
-        # Clean from both system temp and our local temp directory
-        temp_dirs = ['/tmp', str(self.config_dir / 'tmp')]
+        # Clean from our local temp directory
+        script_dir = self.config_dir / 'tmp'
         
-        for temp_dir in temp_dirs:
-            if not os.path.exists(temp_dir):
-                continue
-                
-            try:
-                pattern = os.path.join(temp_dir, 'tmp*_ql.sh')
-                for script_path in glob.glob(pattern):
-                    try:
-                        # Check if it's a QL script and if it's old
-                        if os.path.exists(script_path):
-                            age = time.time() - os.path.getmtime(script_path)
-                            if age > 3600:  # 1 hour
-                                with open(script_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                    content = f.read()
-                                    if '# QL Command Executor' in content:
-                                        os.unlink(script_path)
-                    except (OSError, IOError):
-                        pass  # Ignore individual file errors
-            except (OSError, IOError):
-                pass  # Ignore directory errors
+        if not script_dir.exists():
+            return
+            
+        try:
+            pattern = str(script_dir / '*_ql.sh')
+            for script_path in glob.glob(pattern):
+                try:
+                    if os.path.exists(script_path):
+                        # Clean up scripts older than 5 minutes (more aggressive)
+                        age = time.time() - os.path.getmtime(script_path)
+                        if age > 300:  # 5 minutes
+                            with open(script_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                                if '# QL Command Executor' in content:
+                                    os.unlink(script_path)
+                                    print(f"\033[90m🧹 Cleaned up old script: {os.path.basename(script_path)}\033[0m")
+                except (OSError, IOError):
+                    pass  # Ignore individual file errors
+        except (OSError, IOError):
+            pass  # Ignore directory errors
+    
+    def force_cleanup_all_scripts(self):
+        """Force cleanup of all QL temp scripts (for troubleshooting)"""
+        script_dir = self.config_dir / 'tmp'
+        
+        if not script_dir.exists():
+            return 0
+            
+        cleaned = 0
+        try:
+            pattern = str(script_dir / '*_ql.sh')
+            for script_path in glob.glob(pattern):
+                try:
+                    if os.path.exists(script_path):
+                        with open(script_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            if '# QL Command Executor' in content:
+                                os.unlink(script_path)
+                                cleaned += 1
+                except (OSError, IOError):
+                    pass
+        except (OSError, IOError):
+            pass
+        
+        return cleaned
+    
+    def show_message_and_pause(self, title, lines, wait_text="Press Enter to continue..."):
+        """Display a message with clean formatting and wait for user input"""
+        self.clear_screen()
+        print()  # Top padding
+        
+        if title:
+            print(title)
+            print()
+        
+        for line in lines:
+            print(line)
+        
+        print()
+        input(f"\033[90m{wait_text}\033[0m")
     
     def _check_sudo_cd_issues(self, command):
         """Check for and warn about sudo cd issues"""
         if not command.strip().startswith('sudo cd '):
             return False
         
-        self.clear_screen()
-        print(f"\033[93m⚠️  WARNING: 'sudo cd' command detected!\033[0m")
-        print(f"\033[37mCommand: {command}\033[0m")
-        print("\n\033[96m💡 'sudo cd' doesn't work as expected in command chains.\033[0m")
+        title = f"\033[93m⚠️  WARNING: 'sudo cd' command detected!\033[0m"
+        lines = [
+            f"\033[37mCommand: {command}\033[0m",
+            "",
+            "\033[96m💡 'sudo cd' doesn't work as expected in command chains.\033[0m",
+            "\033[37mThe directory change won't persist for subsequent commands.\033[0m"
+        ]
         
         # Show suggestions
-        self._show_sudo_cd_alternatives(command)
+        suggestion_lines = self._get_sudo_cd_alternatives(command)
+        lines.extend([""] + suggestion_lines)
+        
+        self.show_message_and_pause(title, lines, "")
         
         response = input("\033[96mWould you like to run the command anyway? (y/N): \033[0m").lower()
         if response != 'y':
-            print("\033[37mCommand cancelled.\033[0m")
-            input("\033[90mPress Enter to continue...\033[0m")
+            self.show_message_and_pause(
+                None, 
+                ["\033[37mCommand cancelled. Consider updating your command with one of the suggestions above.\033[0m"],
+                "Press Enter to continue..."
+            )
             return True
         return False
     
-    def _show_sudo_cd_alternatives(self, command):
-        """Show alternative suggestions for sudo cd commands"""
-        print("\033[94mSuggested alternatives:\033[0m")
+    def _get_sudo_cd_alternatives(self, command):
+        """Get alternative suggestions for sudo cd commands"""
+        lines = ["\033[94mSuggested alternatives:\033[0m"]
         
         # Extract the directory and remaining commands
         parts = command.split('&&', 1)
@@ -706,15 +776,18 @@ class QLLauncher:
             rest_part = parts[1].strip()
             directory = cd_part.replace('sudo cd', 'cd').strip()
             
-            print(f"\033[36m1. {directory} && {rest_part}\033[0m")
-            print(f"\033[90m   (Change directory first, then run command normally)\033[0m")
-            print()
-            print(f"\033[36m2. {directory} && sudo {rest_part}\033[0m") 
-            print(f"\033[90m   (Change directory first, then run command with sudo)\033[0m")
-            print()
-            print(f"\033[36m3. sudo bash -c \"{cd_part.replace('sudo ', '')} && {rest_part}\"\033[0m")
-            print(f"\033[90m   (Run entire chain in sudo subshell)\033[0m")
-        print()
+            lines.extend([
+                f"\033[36m1. {directory} && {rest_part}\033[0m",
+                f"\033[90m   (Change directory first, then run command normally)\033[0m",
+                "",
+                f"\033[36m2. {directory} && sudo {rest_part}\033[0m",
+                f"\033[90m   (Change directory first, then run command with sudo)\033[0m",
+                "",
+                f"\033[36m3. sudo bash -c \"{cd_part.replace('sudo ', '')} && {rest_part}\"\033[0m",
+                f"\033[90m   (Run entire chain in sudo subshell)\033[0m"
+            ])
+        
+        return lines
     
     def _create_execution_script(self, alias, command, cmd_type):
         """Create the execution script and return its path"""
@@ -750,7 +823,8 @@ class QLLauncher:
         if cmd_type == 'chain':
             return f"""#!/bin/bash
 # QL Command Executor - Chain Command
-trap 'rm -f "$0"' EXIT
+# Auto-cleanup: this script will self-destruct
+trap 'rm -f "$0" 2>/dev/null || true' EXIT INT TERM
 
 cd /
 
@@ -767,12 +841,16 @@ echo "⛓️  Executing chain command"
 echo "──────────────────────────────────────────────────"
 echo "✅ Chain '{alias}' completed successfully"
 
+# Force cleanup before exec
+rm -f "$0" 2>/dev/null || true
+
 exec {shell}
 """
         else:
             return f"""#!/bin/bash
 # QL Command Executor
-trap 'rm -f "$0"' EXIT
+# Auto-cleanup: this script will self-destruct
+trap 'rm -f "$0" 2>/dev/null || true' EXIT INT TERM
 
 cd /
 
@@ -790,6 +868,9 @@ if [ $exit_code -eq 0 ]; then
 else
     echo "❌ Command failed with exit code $exit_code"
 fi
+
+# Force cleanup before exec
+rm -f "$0" 2>/dev/null || true
 
 exec {shell}
 """
@@ -815,10 +896,17 @@ exec {shell}
         
         # Safety checks
         if self.is_dangerous_command(command):
-            self.clear_screen()
-            if not self.confirm_dangerous_command(command):
-                print("\033[37mCommand cancelled.\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+            title = f"\033[93m⚠️  WARNING: This command appears potentially dangerous!\033[0m"
+            lines = [f"\033[37mCommand: {command}\033[0m"]
+            self.show_message_and_pause(title, lines, "")
+            
+            response = input("\033[96mAre you sure you want to run this? (y/N): \033[0m").lower()
+            if response != 'y':
+                self.show_message_and_pause(
+                    None,
+                    ["\033[37mCommand cancelled.\033[0m"],
+                    "Press Enter to continue..."
+                )
                 return True
         
         # Check for sudo cd issues
@@ -862,6 +950,8 @@ exec {shell}
         emoji = "⛓️" if cmd_type == 'chain' else "🔗"
         
         self.clear_screen()
+        print()  # Top padding
+        
         print(f"\033[95m🔍 Dry run for {emoji} {alias}:\033[0m")
         if description:
             print(f"\033[90m📝 {description}\033[0m")
@@ -877,12 +967,16 @@ exec {shell}
         if self.is_dangerous_command(command):
             print("\033[93m⚠️  WARNING: This command appears potentially dangerous!\033[0m")
         
+        print()
         input("\033[90mPress Enter to continue...\033[0m")
     
     def copy_to_clipboard(self, alias):
         """Copy command to clipboard"""
         if not CLIPBOARD_AVAILABLE:
+            self.clear_screen()
+            print()
             print("\033[91m❌ Clipboard support not available (install pyperclip)\033[0m")
+            print()
             input("\033[90mPress Enter to continue...\033[0m")
             return
         
@@ -893,6 +987,8 @@ exec {shell}
         command = cmd_data.get('command', '')
         
         self.clear_screen()
+        print()  # Top padding
+        
         try:
             pyperclip.copy(command)
             print(f"\033[92m📋 Copied '{alias}' to clipboard!\033[0m")
@@ -900,6 +996,7 @@ exec {shell}
         except Exception as e:
             print(f"\033[91m❌ Error copying to clipboard: {e}\033[0m")
         
+        print()
         input("\033[90mPress Enter to continue...\033[0m")
     
     def interactive_mode(self):
