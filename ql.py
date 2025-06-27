@@ -42,30 +42,6 @@ try:
 except ImportError:
     CLIPBOARD_AVAILABLE = False
 
-# Command templates for common patterns
-COMMAND_TEMPLATES = {
-    'git-setup': {
-        'template': 'git clone {repo} && cd {project} && npm install',
-        'description': 'Clone repo and setup Node.js project',
-        'placeholders': ['repo', 'project']
-    },
-    'backup': {
-        'template': 'tar -czf backup-$(date +%Y%m%d).tar.gz {directory}',
-        'description': 'Create timestamped backup of directory',
-        'placeholders': ['directory']
-    },
-    'deploy': {
-        'template': 'git pull && {build_command} && {deploy_command}',
-        'description': 'Pull, build and deploy sequence',
-        'placeholders': ['build_command', 'deploy_command']
-    },
-    'docker-build': {
-        'template': 'docker build -t {image_name} . && docker run -p {port}:{port} {image_name}',
-        'description': 'Build and run Docker container',
-        'placeholders': ['image_name', 'port']
-    }
-}
-
 class QLLauncher:
     def __init__(self):
         # Force QL to always run from root directory for maximum cd compatibility
@@ -76,12 +52,14 @@ class QLLauncher:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.config_dir / '.qlcom'
         self.stats_file = self.config_dir / '.qlstats'
+        self.templates_file = self.config_dir / '.qltemplates'
         
         # Clean up any leftover scripts from previous sessions
         self.cleanup_old_scripts()
         
         self.commands = self.load_commands()
         self.stats = self.load_stats()
+        self.templates = self.load_templates()
         self.selected_index = 0
         self.input_buffer = ""
         self.input_mode = False
@@ -113,6 +91,284 @@ class QLLauncher:
             'npminstall': 'npm install',
             'dockerrun': 'docker run'
         }
+    
+    def load_templates(self):
+        """Load templates from config file, creating defaults if needed"""
+        # Default templates to create if file doesn't exist
+        default_templates = {
+            'git-setup': {
+                'template': 'git clone {repo} && cd {project} && npm install',
+                'description': 'Clone repo and setup Node.js project',
+                'placeholders': ['repo', 'project']
+            },
+            'backup': {
+                'template': 'tar -czf backup-$(date +%Y%m%d).tar.gz {directory}',
+                'description': 'Create timestamped backup of directory',
+                'placeholders': ['directory']
+            },
+            'deploy': {
+                'template': 'git pull && {build_command} && {deploy_command}',
+                'description': 'Pull, build and deploy sequence',
+                'placeholders': ['build_command', 'deploy_command']
+            },
+            'docker-build': {
+                'template': 'docker build -t {image_name} . && docker run -p {port}:{port} {image_name}',
+                'description': 'Build and run Docker container',
+                'placeholders': ['image_name', 'port']
+            }
+        }
+        
+        if not self.templates_file.exists():
+            # Create template file with defaults
+            try:
+                with open(self.templates_file, 'w', encoding='utf-8') as f:
+                    json.dump(default_templates, f, indent=2, ensure_ascii=False)
+            except (IOError, OSError) as e:
+                print(f"\033[93m⚠️  Warning: Error creating template file: {e}\033[0m")
+                print(f"\033[37mUsing built-in templates.\033[0m")
+                return default_templates
+            return default_templates
+        
+        try:
+            with open(self.templates_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                
+                if not content:
+                    # Empty file, recreate with defaults
+                    with open(self.templates_file, 'w', encoding='utf-8') as f:
+                        json.dump(default_templates, f, indent=2, ensure_ascii=False)
+                    return default_templates
+                
+                # Try to load JSON
+                templates = json.loads(content)
+                
+                # Validate structure
+                validated_templates = {}
+                for name, template_data in templates.items():
+                    if isinstance(template_data, dict) and all(key in template_data for key in ['template', 'description', 'placeholders']):
+                        validated_templates[name] = template_data
+                
+                if not validated_templates:
+                    # No valid templates, recreate with defaults
+                    with open(self.templates_file, 'w', encoding='utf-8') as f:
+                        json.dump(default_templates, f, indent=2, ensure_ascii=False)
+                    return default_templates
+                
+                return validated_templates
+                
+        except (IOError, OSError, json.JSONDecodeError) as e:
+            print(f"\033[93m⚠️  Warning: Error reading template file: {e}\033[0m")
+            print(f"\033[37mRecreating with default templates.\033[0m")
+            try:
+                with open(self.templates_file, 'w', encoding='utf-8') as f:
+                    json.dump(default_templates, f, indent=2, ensure_ascii=False)
+            except:
+                pass
+            return default_templates
+    
+    def save_templates(self):
+        """Save templates to config file"""
+        try:
+            with open(self.templates_file, 'w', encoding='utf-8') as f:
+                json.dump(self.templates, f, indent=2, ensure_ascii=False)
+        except (IOError, OSError) as e:
+            print(f"\033[91m❌ Error saving templates: {e}\033[0m")
+    
+    def extract_placeholders(self, command):
+        """Extract {placeholder} patterns from command"""
+        matches = re.findall(r'\{([^}]+)\}', command)
+        return list(dict.fromkeys(matches))  # Remove duplicates, preserve order
+    
+    def show_template_list(self):
+        """Show available templates and usage help"""
+        self.clear_screen()
+        print("\033[96m🎨 Template Management\033[0m")
+        print()
+        
+        if self.templates:
+            print("\033[94mAvailable templates:\033[0m")
+            max_name_len = max(len(name) for name in self.templates.keys()) if self.templates else 10
+            for name, template in self.templates.items():
+                placeholders = template.get('placeholders', [])
+                placeholder_text = ""
+                if placeholders:
+                    placeholder_text = f" ({', '.join(placeholders)})"
+                print(f"\033[36m  {name:<{max_name_len}}\033[0m \033[37m- {template['description']}\033[90m{placeholder_text}\033[0m")
+            print()
+        else:
+            print("\033[90mNo templates saved yet.\033[0m")
+            print()
+        
+        print("\033[94mCommands:\033[0m")
+        print("\033[36m  template <name>\033[0m                \033[37m- Run saved template\033[0m")
+        print("\033[36m  template <name> <command>\033[0m      \033[37m- Save new template\033[0m")
+        print("\033[36m  template edit <name>\033[0m           \033[37m- Edit template\033[0m")
+        print("\033[36m  template remove <name>\033[0m         \033[37m- Remove template\033[0m")
+        print()
+        print("\033[94mTemplates support {placeholder} syntax for dynamic values\033[0m")
+        print(f"\033[90m📁 Template file: {self.templates_file} (editable)\033[0m")
+    
+    def run_template(self, name):
+        """Run a saved template with placeholder prompts"""
+        if name not in self.templates:
+            print(f"\033[91m❌ Template '{name}' not found!\033[0m")
+            if self.templates:
+                print(f"\033[37mAvailable templates: {', '.join(self.templates.keys())}\033[0m")
+            return
+        
+        template = self.templates[name]
+        template_command = template['template']
+        placeholders = self.extract_placeholders(template_command)
+        
+        print(f"\033[94m🎨 Running template: {name}\033[0m")
+        print(f"\033[90m{template['description']}\033[0m")
+        print(f"\033[90mTemplate: {template_command}\033[0m")
+        print()
+        
+        if not placeholders:
+            print("\033[90mNo placeholders found. Running directly...\033[0m")
+            self.run_direct_command(template_command)
+            return
+        
+        # Collect placeholder values
+        values = {}
+        for placeholder in placeholders:
+            value = input(f"\033[96m{placeholder}: \033[0m").strip()
+            if not value:
+                print("\033[37mTemplate cancelled.\033[0m")
+                return
+            values[placeholder] = value
+        
+        # Replace placeholders and execute
+        final_command = template_command
+        for placeholder, value in values.items():
+            final_command = final_command.replace(f"{{{placeholder}}}", value)
+        
+        print()
+        print(f"\033[90mExecuting: {final_command}\033[0m")
+        self.run_direct_command(final_command)
+    
+    def save_template(self, name, command):
+        """Save a new template to file"""
+        # Check for problematic characters in template name
+        if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+            print("\033[91m❌ Template name can only contain letters, numbers, hyphens and underscores\033[0m")
+            return
+        
+        placeholders = self.extract_placeholders(command)
+        
+        if name in self.templates:
+            print(f"\033[93m⚠️  Template '{name}' already exists!\033[0m")
+            print(f"\033[37mCurrent: {self.templates[name]['template']}\033[0m")
+            response = input("\033[96mOverwrite? (y/N): \033[0m").lower()
+            if response != 'y':
+                print("\033[37mTemplate not saved.\033[0m")
+                return
+        
+        print(f"\033[94m📝 Optional: Add description for template\033[0m")
+        description = input("\033[96mDescription (optional): \033[0m").strip()
+        
+        self.templates[name] = {
+            'template': command,
+            'description': description or f"Template: {name}",
+            'placeholders': placeholders
+        }
+        self.save_templates()
+        
+        placeholder_text = ""
+        if placeholders:
+            placeholder_text = f" with placeholders: {', '.join(placeholders)}"
+        print(f"\033[92m✅ Saved template '{name}'{placeholder_text}\033[0m")
+        if description:
+            print(f"\033[90m📝 {description}\033[0m")
+        print(f"\033[90m📁 Saved to: {self.templates_file}\033[0m")
+    
+    def edit_template(self, name):
+        """Edit an existing template"""
+        if name not in self.templates:
+            print(f"\033[91m❌ Template '{name}' not found!\033[0m")
+            if self.templates:
+                print(f"\033[37mAvailable templates: {', '.join(self.templates.keys())}\033[0m")
+            return
+        
+        template = self.templates[name]
+        current_command = template['template']
+        current_description = template['description']
+        current_placeholders = template.get('placeholders', [])
+        
+        print(f"\033[94mEditing template: {name}\033[0m")
+        print(f"\033[90mCurrent command: {current_command}\033[0m")
+        print(f"\033[90mCurrent description: {current_description}\033[0m")
+        if current_placeholders:
+            print(f"\033[90mCurrent placeholders: {', '.join(current_placeholders)}\033[0m")
+        print()
+        
+        # Edit command
+        new_command = input(f"\033[96mNew command (Enter to keep current): \033[0m").strip()
+        if new_command:
+            current_command = new_command
+        
+        # Edit description
+        new_description = input(f"\033[96mDescription (Enter to keep current): \033[0m").strip()
+        if new_description:
+            current_description = new_description
+        
+        # Update placeholders based on new command
+        new_placeholders = self.extract_placeholders(current_command)
+        
+        # Update template
+        self.templates[name] = {
+            'template': current_command,
+            'description': current_description,
+            'placeholders': new_placeholders
+        }
+        self.save_templates()
+        
+        placeholder_text = ""
+        if new_placeholders:
+            placeholder_text = f" with placeholders: {', '.join(new_placeholders)}"
+        print(f"\033[92m✅ Updated template '{name}'{placeholder_text}\033[0m")
+    
+    def remove_template(self, name):
+        """Remove a template"""
+        if name not in self.templates:
+            print(f"\033[91m❌ Template '{name}' not found!\033[0m")
+            if self.templates:
+                print(f"\033[37mAvailable templates: {', '.join(self.templates.keys())}\033[0m")
+            return
+        
+        template = self.templates[name]
+        print(f"\033[93m⚠️  Remove template '{name}'?\033[0m")
+        print(f"\033[37mTemplate: {template['template']}\033[0m")
+        response = input("\033[96mConfirm removal? (y/N): \033[0m").lower()
+        
+        if response == 'y':
+            del self.templates[name]
+            self.save_templates()
+            print(f"\033[92m✅ Removed template '{name}'\033[0m")
+        else:
+            print("\033[37mTemplate not removed.\033[0m")
+    
+    def run_direct_command(self, command):
+        """Execute a command directly without saving"""
+        # Create and execute script similar to run_command_and_exit but don't save
+        script_path = self._create_execution_script("direct", command, 'link')
+        if not script_path:
+            return
+        
+        # Clear screen and launch
+        self.clear_screen()
+        print(f"\033[96m🚀 Executing command...\033[0m")
+        
+        # Replace current process with the script
+        try:
+            os.execv('/bin/bash', ['/bin/bash', script_path])
+        except (OSError, IOError) as e:
+            print(f"\033[91m❌ Error executing command: {e}\033[0m")
+            try:
+                os.unlink(script_path)
+            except:
+                pass
     
     def load_commands(self):
         """Load commands from config file with backward compatibility"""
@@ -418,16 +674,15 @@ class QLLauncher:
             print("\033[37mGet started by adding your first command:\033[0m")
             print("\033[36m   add <alias> <command>\033[0m")
             print("\033[36m   chain <alias> <cmd1> && <cmd2> && <cmd3>\033[0m")
-            print("\033[36m   template <template_name> <alias>\033[0m")
             print()
             print("\033[37mExample:\033[0m")
             print("\033[36m   add backup tar -czf backup.tar.gz ~/documents\033[0m")
             print("\033[36m   chain setup git pull && npm install && npm run build\033[0m")
-            print("\033[36m   template git-setup myproject\033[0m")
             print()
-            print("\033[94m🎯 Available templates:\033[0m")
-            for name, template in COMMAND_TEMPLATES.items():
-                print(f"\033[36m   {name:<12}\033[0m \033[37m- {template['description']}\033[0m")
+            if self.templates:
+                print("\033[94m🎯 Available templates:\033[0m")
+                for name, template in self.templates.items():
+                    print(f"\033[36m   {name:<12}\033[0m \033[37m- {template['description']}\033[0m")
         else:
             # Show filter status and stats
             stats_text = self.show_stats()
@@ -481,7 +736,7 @@ class QLLauncher:
         print("\033[36m   chain <alias> <cmd1> && <cmd2>\033[0m \033[37m- Add command chain\033[0m")
         print("\033[36m   edit <alias>\033[0m               \033[37m- Edit existing command\033[0m")
         print("\033[36m   remove <alias>\033[0m             \033[37m- Remove command\033[0m")
-        print("\033[36m   template <name> <alias>\033[0m    \033[37m- Create from template\033[0m")
+        print("\033[36m   template <name> [<command>]\033[0m    \033[37m- Manage templates\033[0m")
         print("\033[36m   export <file-path>\033[0m              \033[37m- Export commands to file\033[0m")
         print("\033[36m   import <file-path>\033[0m              \033[37m- Import commands from file\033[0m")
         print("\033[36m   help\033[0m                       \033[37m- Show detailed help\033[0m")
@@ -535,8 +790,8 @@ class QLLauncher:
         print("\033[36m   chain deploy git pull && npm install && npm run build\033[0m")
         print("\033[37m   └─ Creates a command chain (stops on first failure)\033[0m")
         print()
-        print("\033[36m   template git-setup myproject\033[0m")
-        print("\033[37m   └─ Creates command from template with guided setup\033[0m")
+        print("\033[36m   template backup tar -czf backup-{date}.tar.gz {directory}\033[0m")
+        print("\033[37m   └─ Creates a template with placeholders for dynamic values\033[0m")
         print()
         
         print("\033[94m🎯 Navigation Tips:\033[0m")
@@ -554,9 +809,23 @@ class QLLauncher:
         print("\033[37m   • export/import for sharing command sets between machines\033[0m")
         print()
         
+        print("\033[94m🎨 Template Management:\033[0m")
+        print("\033[37m   • template <name> - Run saved template with dynamic placeholders\033[0m")
+        print("\033[37m   • template <name> <command> - Save new template with {placeholder} syntax\033[0m")
+        print("\033[37m   • template edit <name> - Modify existing templates\033[0m")
+        print("\033[37m   • Templates prompt for {placeholder} values each time they run\033[0m")
+        print()
+        
         print("\033[94m🎨 Available Templates:\033[0m")
-        for name, template in COMMAND_TEMPLATES.items():
-            print(f"\033[36m   {name:<15}\033[0m \033[37m{template['description']}\033[0m")
+        if self.templates:
+            for name, template in self.templates.items():
+                placeholders = template.get('placeholders', [])
+                placeholder_text = ""
+                if placeholders:
+                    placeholder_text = f" ({', '.join(placeholders)})"
+                print(f"\033[36m   {name:<15}\033[0m \033[37m{template['description']}\033[90m{placeholder_text}\033[0m")
+        else:
+            print("\033[90m   No templates saved yet\033[0m")
         print()
         
         print("\033[94m⚠️  Safety Features:\033[0m")
@@ -565,23 +834,6 @@ class QLLauncher:
         print("\033[37m   • Commands are validated before saving\033[0m")
         print()
         
-        input("\033[90mPress Enter to continue...\033[0m")
-    
-    def show_templates(self):
-        """Show available templates"""
-        self.clear_screen()
-        print("\033[96m📋 Available Command Templates\033[0m")
-        print()
-        
-        for name, template in COMMAND_TEMPLATES.items():
-            print(f"\033[1;36m{name}\033[0m")
-            print(f"  \033[37m{template['description']}\033[0m")
-            print(f"  \033[90m{template['template']}\033[0m")
-            if template['placeholders']:
-                print(f"  \033[90mPlaceholders: {', '.join(template['placeholders'])}\033[0m")
-            print()
-        
-        print(f"\033[94mUsage: template <name> <alias>\033[0m")
         input("\033[90mPress Enter to continue...\033[0m")
     
     def parse_input(self, user_input):
@@ -597,7 +849,8 @@ class QLLauncher:
         elif command == 'help':
             self.show_help()
         elif command == 'templates':
-            self.show_templates()
+            self.show_template_list()
+            input("\033[90mPress Enter to continue...\033[0m")
         elif command == 'add':
             if len(parts) < 3:
                 print("\033[91m❌ Usage: add <alias> <command>\033[0m")
@@ -631,13 +884,35 @@ class QLLauncher:
                 self.remove_command(parts[1])
                 input("\033[90mPress Enter to continue...\033[0m")
         elif command == 'template':
-            if len(parts) < 3:
-                print("\033[91m❌ Usage: template <template_name> <alias>\033[0m")
-                print("\033[37mAvailable templates: " + ", ".join(COMMAND_TEMPLATES.keys()) + "\033[0m")
+            if len(parts) == 1:
+                # template - show available templates
+                self.show_template_list()
                 input("\033[90mPress Enter to continue...\033[0m")
-            else:
-                self.create_from_template(parts[1], parts[2])
+            elif len(parts) == 2:
+                # template backup - run existing template
+                self.run_template(parts[1])
                 input("\033[90mPress Enter to continue...\033[0m")
+            elif len(parts) >= 3:
+                if parts[1] == 'edit':
+                    # template edit backup
+                    if len(parts) == 3:
+                        self.edit_template(parts[2])
+                    else:
+                        print("\033[91m❌ Usage: template edit <name>\033[0m")
+                    input("\033[90mPress Enter to continue...\033[0m")
+                elif parts[1] == 'remove':
+                    # template remove backup
+                    if len(parts) == 3:
+                        self.remove_template(parts[2])
+                    else:
+                        print("\033[91m❌ Usage: template remove <name>\033[0m")
+                    input("\033[90mPress Enter to continue...\033[0m")
+                else:
+                    # template backup tar -czf backup-{date}.tar.gz
+                    template_name = parts[1]
+                    template_command = ' '.join(parts[2:])
+                    self.save_template(template_name, template_command)
+                    input("\033[90mPress Enter to continue...\033[0m")
         elif command == 'export':
             if len(parts) < 2:
                 print("\033[91m❌ Usage: export <filename>\033[0m")
@@ -1263,43 +1538,6 @@ exec {shell}
                 self.selected_index = max(0, len(display_commands) - 1)
         else:
             print("\033[37mCommand not removed.\033[0m")
-    
-    def create_from_template(self, template_name, alias):
-        """Create a command from a template"""
-        if template_name not in COMMAND_TEMPLATES:
-            print(f"\033[91m❌ Template '{template_name}' not found!\033[0m")
-            print(f"\033[37mAvailable templates: {', '.join(COMMAND_TEMPLATES.keys())}\033[0m")
-            return
-        
-        template = COMMAND_TEMPLATES[template_name]
-        command_template = template['template']
-        placeholders = template['placeholders']
-        
-        print(f"\033[94m🎨 Creating command from template: {template_name}\033[0m")
-        print(f"\033[90m{template['description']}\033[0m")
-        print(f"\033[90mTemplate: {command_template}\033[0m")
-        print()
-        
-        # Get values for placeholders
-        placeholder_values = {}
-        for placeholder in placeholders:
-            value = input(f"\033[96m{placeholder}: \033[0m").strip()
-            if not value:
-                print("\033[37mTemplate creation cancelled.\033[0m")
-                return
-            placeholder_values[placeholder] = value
-        
-        # Replace placeholders
-        final_command = command_template
-        for placeholder, value in placeholder_values.items():
-            final_command = final_command.replace(f"{{{placeholder}}}", value)
-        
-        print(f"\033[90mFinal command: {final_command}\033[0m")
-        response = input("\033[96mCreate this command? (Y/n): \033[0m").lower()
-        
-        if response != 'n':
-            self.add_command(alias, final_command, 'chain' if '&&' in final_command else 'link', 
-                           template['description'], [template_name])
     
     def export_commands(self, filename):
         """Export commands to a file"""
