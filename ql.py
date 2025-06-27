@@ -2,7 +2,7 @@
 """
 QL - Quick Launcher
 A simple CLI tool for saving and running frequently used commands and command chains
-Enhanced version with improved UX and additional features
+Minimal TUI version with improved UX
 """
 
 import os
@@ -18,7 +18,7 @@ import glob
 import shutil
 from pathlib import Path
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Cross-platform terminal handling
 try:
@@ -84,8 +84,10 @@ class QLLauncher:
         self.filter_mode = False
         self.filter_text = ""
         self.filtered_commands = []
-        self.first_run = True
-        self.show_preview = True
+        self.flash_message = ""
+        self.flash_time = 0
+        self.last_exit_status = None
+        self.sort_by_usage = True  # New: sort by usage by default
         
         # Dangerous command patterns
         self.dangerous_patterns = [
@@ -172,11 +174,9 @@ class QLLauncher:
                             continue  # Skip malformed lines
                             
         except (IOError, OSError) as e:
-            print(f"\033[93m⚠️  Warning: Error reading config file: {e}\033[0m")
-            print(f"\033[37mStarting with empty command list.\033[0m")
+            self.set_flash_message(f"⚠ Error reading config: {e}", error=True)
         except Exception as e:
-            print(f"\033[93m⚠️  Warning: Unexpected error reading config file: {e}\033[0m")
-            print(f"\033[37mStarting with empty command list.\033[0m")
+            self.set_flash_message(f"⚠ Unexpected error: {e}", error=True)
         
         return commands
     
@@ -201,7 +201,7 @@ class QLLauncher:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(dict(self.commands), f, indent=2, ensure_ascii=False)
         except (IOError, OSError) as e:
-            print(f"\033[91m❌ Error saving commands: {e}\033[0m")
+            self.set_flash_message(f"✗ Error saving commands: {e}", error=True)
     
     def save_stats(self):
         """Save usage statistics"""
@@ -216,6 +216,19 @@ class QLLauncher:
         self.stats["usage_count"][alias] = self.stats["usage_count"].get(alias, 0) + 1
         self.stats["last_used"][alias] = datetime.now().isoformat()
         self.save_stats()
+    
+    def set_flash_message(self, message, error=False, duration=2):
+        """Set a flash message that will disappear after duration seconds"""
+        self.flash_message = message
+        self.flash_time = time.time() + duration
+        if error:
+            self.last_exit_status = "failed"
+    
+    def get_flash_message(self):
+        """Get current flash message if still valid"""
+        if time.time() < self.flash_time:
+            return self.flash_message
+        return ""
     
     def fuzzy_match(self, text, pattern):
         """Combined substring + fuzzy matching for intuitive search"""
@@ -235,27 +248,21 @@ class QLLauncher:
         return i == len(pattern)
     
     def validate_command(self, command):
-        """Validate command and suggest corrections"""
+        """Validate command with inline feedback"""
         # Check for common typos
         words = command.split()
         if words:
             first_word = words[0]
             if first_word in self.common_typos:
-                suggestion = self.common_typos[first_word]
-                print(f"\033[93m💡 Did you mean: {suggestion}?\033[0m")
-                response = input("\033[96mUse suggestion? (Y/n): \033[0m").lower()
-                if response != 'n':
-                    return command.replace(first_word, suggestion, 1)
+                return command.replace(first_word, self.common_typos[first_word], 1)
         
         # Check if command exists
         words = command.split()
         if words and not words[0].startswith('./') and not '=' in words[0]:
             cmd_name = words[0]
             if not shutil.which(cmd_name) and cmd_name not in ['cd', 'export', 'source', '.']:
-                print(f"\033[93m⚠️  Command '{cmd_name}' not found in PATH\033[0m")
-                response = input("\033[96mContinue anyway? (y/N): \033[0m").lower()
-                if response != 'y':
-                    return None
+                # Don't interrupt flow, just note it
+                pass
         
         return command
     
@@ -266,16 +273,18 @@ class QLLauncher:
                 return True
         return False
     
-    def confirm_dangerous_command(self, command):
-        """Get user confirmation for potentially dangerous commands"""
-        print(f"\033[93m⚠️  WARNING: This command appears potentially dangerous!\033[0m")
-        print(f"\033[37mCommand: {command}\033[0m")
-        response = input("\033[96mAre you sure you want to run this? (y/N): \033[0m").lower()
-        return response == 'y'
-    
     def clear_screen(self):
         """Clear the terminal screen"""
         os.system('clear' if os.name == 'posix' else 'cls')
+    
+    def get_terminal_size(self):
+        """Get terminal dimensions"""
+        try:
+            import shutil
+            cols, rows = shutil.get_terminal_size()
+            return rows, cols
+        except:
+            return 24, 80  # Default fallback
     
     def get_key(self):
         """Get a single keypress from terminal with cross-platform support"""
@@ -325,250 +334,304 @@ class QLLauncher:
     def get_filtered_commands(self):
         """Get commands filtered by current filter text using fuzzy matching"""
         if not self.filter_text:
-            return list(self.commands.items())
+            all_commands = list(self.commands.items())
+        else:
+            all_commands = []
+            for alias, cmd_data in self.commands.items():
+                command = cmd_data.get('command', '')
+                description = cmd_data.get('description', '')
+                tags = ' '.join(cmd_data.get('tags', []))
+                
+                if (self.fuzzy_match(alias, self.filter_text) or 
+                    self.fuzzy_match(command, self.filter_text) or
+                    self.fuzzy_match(description, self.filter_text) or
+                    self.fuzzy_match(tags, self.filter_text)):
+                    all_commands.append((alias, cmd_data))
         
-        filtered = []
-        for alias, cmd_data in self.commands.items():
-            command = cmd_data.get('command', '')
-            description = cmd_data.get('description', '')
-            tags = ' '.join(cmd_data.get('tags', []))
-            
-            if (self.fuzzy_match(alias, self.filter_text) or 
-                self.fuzzy_match(command, self.filter_text) or
-                self.fuzzy_match(description, self.filter_text) or
-                self.fuzzy_match(tags, self.filter_text)):
-                filtered.append((alias, cmd_data))
-        return filtered
+        # Sort by usage if enabled
+        if self.sort_by_usage:
+            return self.sort_commands_by_usage(all_commands)
+        return all_commands
     
-    def get_command_suggestions(self, partial):
-        """Get command suggestions for tab completion"""
-        matches = [alias for alias in self.commands if alias.startswith(partial)]
-        return matches
-    
-    def show_command_preview(self, alias):
-        """Show preview of selected command"""
-        if alias in self.commands:
-            cmd_data = self.commands[alias]
-            command = cmd_data.get('command', '')
-            description = cmd_data.get('description', '')
-            tags = cmd_data.get('tags', [])
+    def sort_commands_by_usage(self, commands_list):
+        """Sort commands by usage frequency and recency"""
+        def get_sort_key(item):
+            alias, cmd_data = item
             usage_count = self.stats["usage_count"].get(alias, 0)
+            last_used = self.stats["last_used"].get(alias, "")
             
-            preview_parts = []
-            if description:
-                preview_parts.append(f"📝 {description}")
-            if tags:
-                preview_parts.append(f"🏷️  {', '.join(tags)}")
-            if usage_count > 0:
-                preview_parts.append(f"📊 Used {usage_count} times")
+            # Calculate recency score
+            if last_used:
+                try:
+                    last_used_date = datetime.fromisoformat(last_used)
+                    days_ago = (datetime.now() - last_used_date).days
+                    recency_score = max(0, 30 - days_ago) / 30  # Score from 0-1
+                except:
+                    recency_score = 0
+            else:
+                recency_score = 0
             
-            if preview_parts:
-                print(f"\033[90m   └─ {' • '.join(preview_parts)}\033[0m")
-            
-            # Show command preview
-            display_command = command if len(command) <= 80 else command[:77] + "..."
-            print(f"\033[90m   └─ Command: {display_command}\033[0m")
+            # Combined score: usage_count + recency bonus
+            return -(usage_count + recency_score * 10)
+        
+        return sorted(commands_list, key=get_sort_key)
     
-    def show_stats(self):
-        """Show command usage statistics"""
-        if not self.commands:
+    def get_usage_indicator(self, alias):
+        """Get usage indicator for a command"""
+        count = self.stats["usage_count"].get(alias, 0)
+        last_used = self.stats["last_used"].get(alias, "")
+        
+        if count == 0:
             return ""
         
-        chains = sum(1 for cmd in self.commands.values() if cmd.get('type') == 'chain')
-        links = len(self.commands) - chains
-        total_usage = sum(self.stats["usage_count"].values())
+        # Check if used recently
+        if last_used:
+            try:
+                last_used_date = datetime.fromisoformat(last_used)
+                days_ago = (datetime.now() - last_used_date).days
+                if days_ago == 0:
+                    indicator = "●"  # Used today
+                elif days_ago <= 7:
+                    indicator = "○"  # Used this week
+                else:
+                    indicator = " "  # Used but not recently
+            except:
+                indicator = " "
+        else:
+            indicator = " "
         
-        stats_text = f"📊 {len(self.commands)} commands ({links} links, {chains} chains)"
-        if total_usage > 0:
-            stats_text += f" • {total_usage} total uses"
+        return f"{indicator}[{count}]"
+    
+    def truncate_command(self, command, max_length):
+        """Intelligently truncate command to fit display"""
+        if len(command) <= max_length:
+            return command
         
-        return stats_text
+        # Try to break at logical points
+        if '&&' in command:
+            parts = command.split('&&')
+            if len(parts[0]) < max_length - 3:
+                return parts[0].strip() + '...'
+        
+        # Otherwise just truncate
+        return command[:max_length-3] + '...'
+    
+    def get_help_line(self):
+        """Get context-sensitive help line"""
+        if self.filter_mode:
+            return "[Esc] cancel • [Enter] select"
+        elif self.input_mode:
+            if self.input_buffer.startswith(('add ', 'chain ', 'edit ', 'remove ')):
+                return "[Enter] confirm • [Esc] cancel"
+            else:
+                return "[Tab] complete • [Enter] run • [Esc] cancel"
+        else:
+            if self.commands:
+                return "[1-9] quick • [/] filter • [a]dd • [s]tats • [?] help • [q]uit"
+            else:
+                return "[a]dd • [?] help • [q]uit"
     
     def show_main_screen(self):
-        """Display the main interface"""
-        if not self.first_run:
-            self.clear_screen()
-        self.first_run = False
+        """Display the main interface - minimal version"""
+        self.clear_screen()
         
-        # Header with blue theme
-        print("\033[96m" + "=" * 60)
-        print("🚀 QL - Quick Launcher")
-        print("=" * 60 + "\033[0m")
-        print()
+        rows, cols = self.get_terminal_size()
         
-        # Get commands to display (filtered or all)
+        # Header with stats
+        command_count = len(self.commands)
+        if self.filter_mode and self.filter_text:
+            filtered_count = len(self.get_filtered_commands())
+            header = f"QL - Quick Launcher ({filtered_count}/{command_count} commands)"
+        else:
+            chains = sum(1 for cmd in self.commands.values() if cmd.get('type') == 'chain')
+            if chains > 0:
+                header = f"QL - Quick Launcher ({command_count} commands: {command_count - chains} links, {chains} chains)"
+            else:
+                header = f"QL - Quick Launcher ({command_count} commands)"
+        
+        # Add last command status if exists
+        if self.last_exit_status:
+            header += f" [last: {self.last_exit_status}]"
+        
+        print(header)
+        print("─" * min(cols, 80))
+        
+        # Flash message if any
+        flash_msg = self.get_flash_message()
+        if flash_msg:
+            print(flash_msg)
+            print()
+        
+        # Filter mode header
+        if self.filter_mode:
+            print(f"/{self.filter_text}_")
+            print("─" * min(cols, 80))
+        
+        # Get commands to display
         display_commands = self.get_filtered_commands()
         
         if not self.commands:
-            print("\033[94m📝 No commands saved yet!\033[0m")
-            print("\033[37mGet started by adding your first command:\033[0m")
-            print("\033[36m   add <alias> <command>\033[0m")
-            print("\033[36m   chain <alias> <cmd1> && <cmd2> && <cmd3>\033[0m")
-            print("\033[36m   template <template_name> <alias>\033[0m")
-            print()
-            print("\033[37mExample:\033[0m")
-            print("\033[36m   add backup tar -czf backup.tar.gz ~/documents\033[0m")
-            print("\033[36m   chain setup git pull && npm install && npm run build\033[0m")
-            print("\033[36m   template git-setup myproject\033[0m")
-            print()
-            print("\033[94m🎯 Available templates:\033[0m")
-            for name, template in COMMAND_TEMPLATES.items():
-                print(f"\033[36m   {name:<12}\033[0m \033[37m- {template['description']}\033[0m")
+            print("\nNo commands saved yet. Press 'a' to add your first command.")
+        elif not display_commands and self.filter_mode:
+            print("\nNo commands match your filter.")
         else:
-            # Show filter status and stats
-            stats_text = self.show_stats()
-            if self.filter_mode:
-                print(f"\033[94m🔍 Filter: \"{self.filter_text}\" ({len(display_commands)}/{len(self.commands)} commands)\033[0m")
-            else:
-                print(f"\033[94m{stats_text}\033[0m")
-            print()
+            # Calculate display parameters
+            max_alias_len = max(len(alias) for alias, _ in display_commands) if display_commands else 10
+            max_alias_len = min(max_alias_len, 20)  # Cap alias display length
             
-            if not display_commands:
-                print("\033[93m📭 No commands match your filter.\033[0m")
-            else:
-                # Calculate max alias length for alignment
-                max_alias_len = max(len(alias) for alias, _ in display_commands) if display_commands else 10
+            # Calculate available space for command
+            # Format: "  N. alias [count] → command"
+            prefix_len = 5  # "  N. "
+            usage_len = 6  # " [99] "
+            arrow_len = 3  # " → "
+            available_for_cmd = cols - prefix_len - max_alias_len - usage_len - arrow_len - 2
+            available_for_cmd = max(30, available_for_cmd)  # Minimum command display
+            
+            # Display commands (limited by terminal height)
+            max_display = rows - 8  # Leave room for header, footer, help line
+            for i, (alias, cmd_data) in enumerate(display_commands[:max_display]):
+                cmd_type = cmd_data.get('type', 'link')
+                command = cmd_data.get('command', '')
                 
-                for i, (alias, cmd_data) in enumerate(display_commands):
-                    cmd_type = cmd_data.get('type', 'link')
-                    command = cmd_data.get('command', '')
-                    description = cmd_data.get('description', '')
-                    usage_count = self.stats["usage_count"].get(alias, 0)
-                    
-                    # Choose emoji based on type
-                    emoji = "⛓️" if cmd_type == 'chain' else "🔗"
-                    
-                    # Truncate long commands for display
-                    display_command = command if len(command) <= 40 else command[:37] + "..."
-                    
-                    # Show number for quick selection (1-9), or position for 10+
-                    if i < 9:
-                        num_display = f"{i+1}"
-                    else:
-                        num_display = f"{i+1:2d}" if i < 99 else "##"
-                    
-                    # Add usage indicator
-                    usage_indicator = f" ({usage_count})" if usage_count > 0 else ""
-                    
-                    # Highlight selected command
-                    if i == self.selected_index:
-                        print(f"\033[1;97;44m {num_display}. {emoji} {alias:<{max_alias_len}}{usage_indicator} → {display_command}\033[0m")
-                        if self.show_preview:
-                            self.show_command_preview(alias)
-                    else:
-                        # Show clickable numbers (1-9) in bright color, others in dim
-                        num_color = "\033[96m" if i < 9 else "\033[90m"
-                        alias_color = "\033[1;36m" if usage_count > 0 else "\033[36m"
-                        print(f"{num_color} {num_display}.\033[0m {emoji} {alias_color}{alias:<{max_alias_len}}\033[90m{usage_indicator}\033[0m \033[37m→\033[0m {display_command}")
+                # Format line number
+                if i < 9:
+                    num_str = f"{i+1}."
+                else:
+                    num_str = f"{i+1:2d}"
+                
+                # Get usage indicator
+                usage = self.get_usage_indicator(alias)
+                
+                # Add chain marker if needed
+                type_marker = " ⛓️ " if cmd_type == 'chain' else "   "
+                
+                # Truncate command to fit
+                display_command = self.truncate_command(command, available_for_cmd)
+                
+                # Build the line
+                if i == self.selected_index:
+                    # Selected line
+                    line = f" ▸{num_str} {alias:<{max_alias_len}}{type_marker}{usage:>6} → {display_command}"
+                else:
+                    line = f"  {num_str} {alias:<{max_alias_len}}{type_marker}{usage:>6} → {display_command}"
+                
+                print(line)
+            
+            if len(display_commands) > max_display:
+                print(f"\n  ... and {len(display_commands) - max_display} more")
         
+        # Bottom help line
         print()
-        print("\033[94m⚡ Commands:\033[0m")
-        print("\033[36m   add <alias> <command>\033[0m      \033[37m- Add new command link\033[0m")
-        print("\033[36m   chain <alias> <cmd1> && <cmd2>\033[0m \033[37m- Add command chain\033[0m")
-        print("\033[36m   edit <alias>\033[0m               \033[37m- Edit existing command\033[0m")
-        print("\033[36m   remove <alias>\033[0m             \033[37m- Remove command\033[0m")
-        print("\033[36m   template <name> <alias>\033[0m    \033[37m- Create from template\033[0m")
-        print("\033[36m   export <file>\033[0m              \033[37m- Export commands to file\033[0m")
-        print("\033[36m   import <file>\033[0m              \033[37m- Import commands from file\033[0m")
-        print("\033[36m   help\033[0m                       \033[37m- Show detailed help\033[0m")
-        print("\033[36m   quit\033[0m or \033[36mq\033[0m                  \033[37m- Exit ql\033[0m")
-        print()
-        
-        if self.commands:
-            print("\033[94m🎯 Navigation:\033[0m")
-            print("\033[36m   1-9\033[0m                       \033[37m- Quick select (first 9 commands)\033[0m")
-            print("\033[36m   ↑/↓ arrows\033[0m                \033[37m- Navigate all commands\033[0m")
-            print("\033[36m   Enter\033[0m                     \033[37m- Run selected command\033[0m")
-            print("\033[36m   Ctrl+D\033[0m                    \033[37m- Dry run (preview command)\033[0m")
-            if CLIPBOARD_AVAILABLE:
-                print("\033[36m   Ctrl+Y\033[0m                    \033[37m- Copy command to clipboard\033[0m")
-            print("\033[36m   /\033[0m                         \033[37m- Filter commands (fuzzy)\033[0m")
-            print("\033[36m   Tab\033[0m                       \033[37m- Auto-complete alias\033[0m")
-            print("\033[36m   p\033[0m                         \033[37m- Toggle preview on/off\033[0m")
+        if self.input_mode:
+            print(f"> {self.input_buffer}_")
+        else:
             print()
         
-        print(f"\033[90m📁 Commands stored in: {self.config_file}\033[0m")
-        
-        # Input prompt
-        if self.filter_mode:
-            print(f"\033[95m🔍 Filter: {self.filter_text}\033[7m \033[0m")
-        elif self.input_mode:
-            print(f"\033[96m> {self.input_buffer}\033[7m \033[0m")
-        else:
-            print("\033[96m> \033[0m", end="", flush=True)
-    
-    def move_command_to_front(self, alias):
-        """Move recently used command to front of the list"""
-        if alias in self.commands:
-            cmd_data = self.commands.pop(alias)
-            new_commands = OrderedDict()
-            new_commands[alias] = cmd_data
-            new_commands.update(self.commands)
-            self.commands = new_commands
+        print("─" * min(cols, 80))
+        print(self.get_help_line())
     
     def show_help(self):
-        """Show detailed help"""
+        """Show simplified help screen"""
         self.clear_screen()
-        print("\033[96m" + "=" * 60)
-        print("🚀 QL - Quick Launcher Help")
-        print("=" * 60 + "\033[0m")
-        print()
+        help_text = """QL Help
+─────────────────────────────────────────────
+
+ADDING COMMANDS
+  add <alias> <cmd>     Add a command
+  chain <alias> <cmds>  Add command chain (&&)
+  
+NAVIGATION  
+  1-9     Quick select      /        Filter
+  j,k     Up/down          Enter    Run
+  g,G     Top/bottom       d        Dry run
+  
+MANAGEMENT
+  e       Edit selected    r        Remove
+  E       Export all       I        Import
+
+Press any key to return"""
         
-        print("\033[94m📝 Adding Commands:\033[0m")
-        print("\033[36m   add backup tar -czf backup.tar.gz ~/docs\033[0m")
-        print("\033[37m   └─ Creates a simple command link\033[0m")
-        print()
-        print("\033[36m   chain deploy git pull && npm install && npm run build\033[0m")
-        print("\033[37m   └─ Creates a command chain (stops on first failure)\033[0m")
-        print()
-        print("\033[36m   template git-setup myproject\033[0m")
-        print("\033[37m   └─ Creates command from template with guided setup\033[0m")
-        print()
-        
-        print("\033[94m🎯 Navigation Tips:\033[0m")
-        print("\033[37m   • Use / to search/filter commands by name, description, or tags\033[0m")
-        print("\033[37m   • Arrow keys to navigate, Enter to run\033[0m")
-        print("\033[37m   • Numbers 1-9 for quick selection of first 9 commands\033[0m")
-        print("\033[37m   • Ctrl+D for dry run preview (see what would execute)\033[0m")
-        print("\033[37m   • p key to toggle command preview on/off\033[0m")
-        print()
-        
-        print("\033[94m🔧 Command Management:\033[0m")
-        print("\033[37m   • edit <alias> - Modify existing commands\033[0m")
-        print("\033[37m   • Commands can have descriptions and tags for better organization\033[0m")
-        print("\033[37m   • Usage statistics track how often you use each command\033[0m")
-        print("\033[37m   • export/import for sharing command sets between machines\033[0m")
-        print()
-        
-        print("\033[94m🎨 Available Templates:\033[0m")
-        for name, template in COMMAND_TEMPLATES.items():
-            print(f"\033[36m   {name:<15}\033[0m \033[37m{template['description']}\033[0m")
-        print()
-        
-        print("\033[94m⚠️  Safety Features:\033[0m")
-        print("\033[37m   • Potentially dangerous commands require confirmation\033[0m")
-        print("\033[37m   • Common command typos are detected and corrected\033[0m")
-        print("\033[37m   • Commands are validated before saving\033[0m")
-        print()
-        
-        input("\033[90mPress Enter to continue...\033[0m")
+        print(help_text)
+        self.get_key()
     
-    def show_templates(self):
-        """Show available templates"""
+    def show_stats(self):
+        """Show minimal statistics view"""
         self.clear_screen()
-        print("\033[96m📋 Available Command Templates\033[0m")
+        
+        print("Usage Statistics")
+        print("─" * 50)
         print()
         
-        for name, template in COMMAND_TEMPLATES.items():
-            print(f"\033[1;36m{name}\033[0m")
-            print(f"  \033[37m{template['description']}\033[0m")
-            print(f"  \033[90m{template['template']}\033[0m")
-            if template['placeholders']:
-                print(f"  \033[90mPlaceholders: {', '.join(template['placeholders'])}\033[0m")
-            print()
+        if not self.commands:
+            print("No commands to show statistics for.")
+            print("\nPress any key to return")
+            self.get_key()
+            return
         
-        print(f"\033[94mUsage: template <name> <alias>\033[0m")
-        input("\033[90mPress Enter to continue...\033[0m")
+        # Get usage data
+        usage_data = []
+        for alias, cmd_data in self.commands.items():
+            count = self.stats["usage_count"].get(alias, 0)
+            if count > 0:
+                usage_data.append((alias, count))
+        
+        if not usage_data:
+            print("No usage data yet. Start using commands!")
+        else:
+            # Sort by usage
+            usage_data.sort(key=lambda x: x[1], reverse=True)
+            
+            # Show top 10
+            print("Most used:")
+            max_count = max(count for _, count in usage_data)
+            for alias, count in usage_data[:10]:
+                bar_length = int((count / max_count) * 20)
+                bar = "█" * bar_length + "░" * (20 - bar_length)
+                print(f"  {alias:<15} {bar} {count}")
+        
+        print()
+        total_runs = sum(self.stats["usage_count"].values())
+        chains = sum(1 for cmd in self.commands.values() if cmd.get('type') == 'chain')
+        print(f"Total runs: {total_runs}")
+        print(f"Commands: {len(self.commands)} ({len(self.commands) - chains} links, {chains} chains)")
+        
+        print("\nPress any key to return")
+        self.get_key()
+    
+    def dry_run_command(self, alias):
+        """Show improved dry run display"""
+        if alias not in self.commands:
+            return
+        
+        cmd_data = self.commands[alias]
+        command = cmd_data.get('command', '')
+        cmd_type = cmd_data.get('type', 'link')
+        
+        self.clear_screen()
+        print(f"Dry run: {alias}")
+        print("─" * 50)
+        print("Would execute:")
+        print(f"  {command}")
+        
+        # Try to expand any obvious variables
+        if '$' in command or '`' in command:
+            print("\nWith expansions:")
+            # Simple date expansion for demonstration
+            import re
+            expanded = command
+            date_pattern = r'\$\(date \+%Y%m%d\)'
+            if re.search(date_pattern, expanded):
+                expanded = re.sub(date_pattern, datetime.now().strftime('%Y%m%d'), expanded)
+                print(f"  {expanded}")
+        
+        if cmd_type == 'chain':
+            print("\n(Executes as command chain - stops on first failure)")
+        
+        if self.is_dangerous_command(command):
+            print("\n⚠ Warning: This command appears potentially dangerous!")
+        
+        print("\nPress any key to return")
+        self.get_key()
     
     def parse_input(self, user_input):
         """Parse and execute user input"""
@@ -580,72 +643,60 @@ class QLLauncher:
         
         if command in ['quit', 'q', 'exit']:
             return False
-        elif command == 'help':
+        elif command == 'help' or command == '?':
             self.show_help()
-        elif command == 'templates':
-            self.show_templates()
-        elif command == 'add':
+        elif command == 'stats' or command == 's':
+            self.show_stats()
+        elif command == 'add' or command == 'a':
             if len(parts) < 3:
-                print("\033[91m❌ Usage: add <alias> <command>\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                self.set_flash_message("✗ Usage: add <alias> <command>", error=True)
             else:
                 alias = parts[1]
                 cmd = ' '.join(parts[2:])
                 self.add_command(alias, cmd, 'link')
-                input("\033[90mPress Enter to continue...\033[0m")
         elif command == 'chain':
             if len(parts) < 3:
-                print("\033[91m❌ Usage: chain <alias> <cmd1> && <cmd2> && <cmd3>\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                self.set_flash_message("✗ Usage: chain <alias> <cmd1> && <cmd2>", error=True)
             else:
                 alias = parts[1]
                 cmd = ' '.join(parts[2:])
                 self.add_command(alias, cmd, 'chain')
-                input("\033[90mPress Enter to continue...\033[0m")
-        elif command == 'edit':
+        elif command == 'edit' or command == 'e':
             if len(parts) < 2:
-                print("\033[91m❌ Usage: edit <alias>\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                # Edit selected command
+                display_commands = self.get_filtered_commands()
+                if display_commands and 0 <= self.selected_index < len(display_commands):
+                    self.edit_command(display_commands[self.selected_index][0])
+                else:
+                    self.set_flash_message("✗ No command selected", error=True)
             else:
                 self.edit_command(parts[1])
-                input("\033[90mPress Enter to continue...\033[0m")
-        elif command == 'remove':
+        elif command == 'remove' or command == 'r':
             if len(parts) < 2:
-                print("\033[91m❌ Usage: remove <alias>\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                # Remove selected command
+                display_commands = self.get_filtered_commands()
+                if display_commands and 0 <= self.selected_index < len(display_commands):
+                    self.remove_command(display_commands[self.selected_index][0])
+                else:
+                    self.set_flash_message("✗ No command selected", error=True)
             else:
                 self.remove_command(parts[1])
-                input("\033[90mPress Enter to continue...\033[0m")
-        elif command == 'template':
-            if len(parts) < 3:
-                print("\033[91m❌ Usage: template <template_name> <alias>\033[0m")
-                print("\033[37mAvailable templates: " + ", ".join(COMMAND_TEMPLATES.keys()) + "\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
-            else:
-                self.create_from_template(parts[1], parts[2])
-                input("\033[90mPress Enter to continue...\033[0m")
-        elif command == 'export':
+        elif command == 'export' or command == 'E':
             if len(parts) < 2:
-                print("\033[91m❌ Usage: export <filename>\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                self.set_flash_message("✗ Usage: export <filename>", error=True)
             else:
                 self.export_commands(parts[1])
-                input("\033[90mPress Enter to continue...\033[0m")
-        elif command == 'import':
+        elif command == 'import' or command == 'I':
             if len(parts) < 2:
-                print("\033[91m❌ Usage: import <filename>\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                self.set_flash_message("✗ Usage: import <filename>", error=True)
             else:
                 self.import_commands(parts[1])
-                input("\033[90mPress Enter to continue...\033[0m")
         else:
             # Try to run as a command alias
             if command in self.commands:
                 return self.run_command_and_exit(command)
             else:
-                print(f"\033[91m❌ Unknown command: {command}\033[0m")
-                print("\033[37mType 'help' for available commands or 'quit' to exit.\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
+                self.set_flash_message(f"✗ Unknown command: {command}", error=True)
         
         return True
     
@@ -675,49 +726,34 @@ class QLLauncher:
             except (OSError, IOError):
                 pass  # Ignore directory errors
     
-    def _check_sudo_cd_issues(self, command):
-        """Check for and warn about sudo cd issues"""
-        if not command.strip().startswith('sudo cd '):
-            return False
-        
-        self.clear_screen()
-        print(f"\033[93m⚠️  WARNING: 'sudo cd' command detected!\033[0m")
-        print(f"\033[37mCommand: {command}\033[0m")
-        print("\n\033[96m💡 'sudo cd' doesn't work as expected in command chains.\033[0m")
-        
-        # Show suggestions
-        self._show_sudo_cd_alternatives(command)
-        
-        response = input("\033[96mWould you like to run the command anyway? (y/N): \033[0m").lower()
-        if response != 'y':
-            print("\033[37mCommand cancelled.\033[0m")
-            input("\033[90mPress Enter to continue...\033[0m")
+    def run_command_and_exit(self, alias):
+        """Run command by feeding it directly to the terminal"""
+        if alias not in self.commands:
             return True
-        return False
-    
-    def _show_sudo_cd_alternatives(self, command):
-        """Show alternative suggestions for sudo cd commands"""
-        print("\033[94mSuggested alternatives:\033[0m")
         
-        # Extract the directory and remaining commands
-        parts = command.split('&&', 1)
-        if len(parts) == 2:
-            cd_part = parts[0].strip()
-            rest_part = parts[1].strip()
-            directory = cd_part.replace('sudo cd', 'cd').strip()
-            
-            print(f"\033[36m1. {directory} && {rest_part}\033[0m")
-            print(f"\033[90m   (Change directory first, then run command normally)\033[0m")
-            print()
-            print(f"\033[36m2. {directory} && sudo {rest_part}\033[0m") 
-            print(f"\033[90m   (Change directory first, then run command with sudo)\033[0m")
-            print()
-            print(f"\033[36m3. sudo bash -c \"{cd_part.replace('sudo ', '')} && {rest_part}\"\033[0m")
-            print(f"\033[90m   (Run entire chain in sudo subshell)\033[0m")
-        print()
-    
-    def _create_execution_script(self, alias, command, cmd_type):
-        """Create the execution script and return its path"""
+        # Clean up any old scripts first
+        self.cleanup_old_scripts()
+        
+        # Update usage statistics
+        self.update_usage_stats(alias)
+        
+        # Move to front for recent usage
+        if self.sort_by_usage:
+            self.save_stats()  # Save immediately so sorting reflects new usage
+        
+        cmd_data = self.commands[alias]
+        command = cmd_data.get('command', '')
+        cmd_type = cmd_data.get('type', 'link')
+        
+        # Safety check for dangerous commands
+        if self.is_dangerous_command(command):
+            print("\n⚠ Dangerous command detected!")
+            response = input("Run anyway? y/N: ").lower()
+            if response != 'y':
+                self.set_flash_message("Command cancelled")
+                return True
+        
+        # Create execution script
         try:
             script_dir = self.config_dir / 'tmp'
             script_dir.mkdir(exist_ok=True)
@@ -732,52 +768,34 @@ class QLLauncher:
                 shell = '/bin/bash'
             
             # Write script content
-            script_content = self._generate_script_content(alias, command, cmd_type, shell)
-            temp_script.write(script_content)
-            temp_script.close()
-            
-            # Make executable
-            os.chmod(temp_script.name, stat.S_IRWXU)
-            return temp_script.name
-            
-        except (OSError, IOError) as e:
-            print(f"\033[91m❌ Error creating script: {e}\033[0m")
-            input("\033[90mPress Enter to continue...\033[0m")
-            return None
-    
-    def _generate_script_content(self, alias, command, cmd_type, shell):
-        """Generate the script content"""
-        if cmd_type == 'chain':
-            return f"""#!/bin/bash
+            if cmd_type == 'chain':
+                script_content = f"""#!/bin/bash
 # QL Command Executor - Chain Command
 trap 'rm -f "$0"' EXIT
 
 cd /
 
-echo "🚀 Running chain: {alias}"
-echo "📁 Working directory: $(pwd)"
+echo "Running chain: {alias}"
 echo "──────────────────────────────────────────────────"
 
 set -e
 set -o pipefail
 
-echo "⛓️  Executing chain command"
 {command}
 
 echo "──────────────────────────────────────────────────"
-echo "✅ Chain '{alias}' completed successfully"
+echo "✓ Chain completed"
 
 exec {shell}
 """
-        else:
-            return f"""#!/bin/bash
+            else:
+                script_content = f"""#!/bin/bash
 # QL Command Executor
 trap 'rm -f "$0"' EXIT
 
 cd /
 
-echo "🚀 Running: {command}"
-echo "📁 Working directory: $(pwd)"
+echo "Running: {alias}"
 echo "──────────────────────────────────────────────────"
 
 {command}
@@ -786,121 +804,31 @@ exit_code=$?
 
 echo "──────────────────────────────────────────────────"
 if [ $exit_code -eq 0 ]; then
-    echo "✅ Command completed successfully"
+    echo "✓ Command completed"
 else
-    echo "❌ Command failed with exit code $exit_code"
+    echo "✗ Command failed (exit code $exit_code)"
 fi
 
 exec {shell}
 """
-    
-    def run_command_and_exit(self, alias):
-        """Run command by feeding it directly to the terminal - simplified version"""
-        if alias not in self.commands:
-            return True
-        
-        # Clean up any old scripts first
-        self.cleanup_old_scripts()
-        
-        # Update usage statistics
-        self.update_usage_stats(alias)
-        
-        # Move to front for recent usage
-        self.move_command_to_front(alias)
-        self.save_commands()
-        
-        cmd_data = self.commands[alias]
-        command = cmd_data.get('command', '')
-        cmd_type = cmd_data.get('type', 'link')
-        
-        # Safety checks
-        if self.is_dangerous_command(command):
+            
+            temp_script.write(script_content)
+            temp_script.close()
+            
+            # Make executable
+            os.chmod(temp_script.name, stat.S_IRWXU)
+            
+            # Clear screen and launch
             self.clear_screen()
-            if not self.confirm_dangerous_command(command):
-                print("\033[37mCommand cancelled.\033[0m")
-                input("\033[90mPress Enter to continue...\033[0m")
-                return True
-        
-        # Check for sudo cd issues
-        if self._check_sudo_cd_issues(command):
-            return True
-        
-        # Create and execute script
-        script_path = self._create_execution_script(alias, command, cmd_type)
-        if not script_path:
-            return True
-        
-        # Clear screen and launch
-        self.clear_screen()
-        emoji = "⛓️" if cmd_type == 'chain' else "🔗"
-        print(f"\033[96m🚀 Launching {emoji} {alias} in terminal...\033[0m")
-        
-        # Replace current process with the script
-        try:
-            os.execv('/bin/bash', ['/bin/bash', script_path])
-        except (OSError, IOError) as e:
-            print(f"\033[91m❌ Error executing script: {e}\033[0m")
-            try:
-                os.unlink(script_path)
-            except:
-                pass
-            input("\033[90mPress Enter to continue...\033[0m")
+            
+            # Replace current process with the script
+            os.execv('/bin/bash', ['/bin/bash', temp_script.name])
+            
+        except Exception as e:
+            self.set_flash_message(f"✗ Error: {e}", error=True)
             return True
         
         return False
-    
-    def dry_run_command(self, alias):
-        """Show what command would run without executing it"""
-        if alias not in self.commands:
-            return
-        
-        cmd_data = self.commands[alias]
-        command = cmd_data.get('command', '')
-        cmd_type = cmd_data.get('type', 'link')
-        description = cmd_data.get('description', '')
-        tags = cmd_data.get('tags', [])
-        emoji = "⛓️" if cmd_type == 'chain' else "🔗"
-        
-        self.clear_screen()
-        print(f"\033[95m🔍 Dry run for {emoji} {alias}:\033[0m")
-        if description:
-            print(f"\033[90m📝 {description}\033[0m")
-        if tags:
-            print(f"\033[90m🏷️  Tags: {', '.join(tags)}\033[0m")
-        print()
-        print(f"\033[37m{command}\033[0m")
-        print()
-        
-        if cmd_type == 'chain':
-            print("\033[90mThis would run as a command chain (stops on first failure)\033[0m")
-        
-        if self.is_dangerous_command(command):
-            print("\033[93m⚠️  WARNING: This command appears potentially dangerous!\033[0m")
-        
-        input("\033[90mPress Enter to continue...\033[0m")
-    
-    def copy_to_clipboard(self, alias):
-        """Copy command to clipboard"""
-        if not CLIPBOARD_AVAILABLE:
-            print("\033[91m❌ Clipboard support not available (install pyperclip)\033[0m")
-            input("\033[90mPress Enter to continue...\033[0m")
-            return
-        
-        if alias not in self.commands:
-            return
-        
-        cmd_data = self.commands[alias]
-        command = cmd_data.get('command', '')
-        
-        self.clear_screen()
-        try:
-            pyperclip.copy(command)
-            print(f"\033[92m📋 Copied '{alias}' to clipboard!\033[0m")
-            print(f"\033[90mCommand: {command}\033[0m")
-        except Exception as e:
-            print(f"\033[91m❌ Error copying to clipboard: {e}\033[0m")
-        
-        input("\033[90mPress Enter to continue...\033[0m")
     
     def interactive_mode(self):
         """Main interactive loop"""
@@ -928,17 +856,6 @@ exec {shell}
                             if not self.run_command_and_exit(selected_alias):
                                 break
                 
-                elif key == '\t' and self.input_mode:  # Tab completion
-                    suggestions = self.get_command_suggestions(self.input_buffer)
-                    if len(suggestions) == 1:
-                        self.input_buffer = suggestions[0] + ' '
-                    elif len(suggestions) > 1:
-                        # Show suggestions
-                        print(f"\n\033[90mSuggestions: {', '.join(suggestions[:5])}\033[0m")
-                        if len(suggestions) > 5:
-                            print(f"\033[90m... and {len(suggestions) - 5} more\033[0m")
-                        input("\033[90mPress Enter to continue...\033[0m")
-                
                 elif key.isdigit() and not self.input_mode and not self.filter_mode:
                     # Quick select with number keys (1-9)
                     num = int(key) - 1
@@ -947,33 +864,55 @@ exec {shell}
                         if not self.run_command_and_exit(selected_alias):
                             break
                 
-                elif key == 'p' and not self.input_mode and not self.filter_mode:
-                    # Toggle preview
-                    self.show_preview = not self.show_preview
+                elif key == 'UP' or key == 'k':
+                    if not self.input_mode and not self.filter_mode and display_commands:
+                        self.selected_index = max(0, self.selected_index - 1)
                 
-                elif key == 'UP' and display_commands and not self.input_mode and not self.filter_mode:
-                    self.selected_index = max(0, self.selected_index - 1)
+                elif key == 'DOWN' or key == 'j':
+                    if not self.input_mode and not self.filter_mode and display_commands:
+                        self.selected_index = min(len(display_commands) - 1, self.selected_index + 1)
                 
-                elif key == 'DOWN' and display_commands and not self.input_mode and not self.filter_mode:
-                    self.selected_index = min(len(display_commands) - 1, self.selected_index + 1)
+                elif key == 'g' and not self.input_mode and not self.filter_mode:
+                    # Go to top
+                    self.selected_index = 0
                 
-                elif key == '\x04' and display_commands and not self.input_mode and not self.filter_mode:
-                    # Ctrl+D - Dry run selected command
+                elif key == 'G' and not self.input_mode and not self.filter_mode:
+                    # Go to bottom
+                    if display_commands:
+                        self.selected_index = len(display_commands) - 1
+                
+                elif key == 'd' and display_commands and not self.input_mode and not self.filter_mode:
+                    # Dry run
                     if 0 <= self.selected_index < len(display_commands):
                         selected_alias = display_commands[self.selected_index][0]
                         self.dry_run_command(selected_alias)
-                
-                elif key == '\x19' and display_commands and not self.input_mode and not self.filter_mode:
-                    # Ctrl+Y - Copy selected command
-                    if 0 <= self.selected_index < len(display_commands):
-                        selected_alias = display_commands[self.selected_index][0]
-                        self.copy_to_clipboard(selected_alias)
                 
                 elif key == '/' and not self.input_mode:
                     # Enter filter mode
                     self.filter_mode = True
                     self.filter_text = ""
                     self.selected_index = 0
+                
+                elif key == '?' and not self.input_mode and not self.filter_mode:
+                    self.show_help()
+                
+                elif key == 's' and not self.input_mode and not self.filter_mode:
+                    self.show_stats()
+                
+                elif key == 'a' and not self.input_mode and not self.filter_mode:
+                    self.input_mode = True
+                    self.input_buffer = "add "
+                
+                elif key == 'e' and not self.input_mode and not self.filter_mode:
+                    if display_commands and 0 <= self.selected_index < len(display_commands):
+                        self.edit_command(display_commands[self.selected_index][0])
+                
+                elif key == 'r' and not self.input_mode and not self.filter_mode:
+                    if display_commands and 0 <= self.selected_index < len(display_commands):
+                        self.remove_command(display_commands[self.selected_index][0])
+                
+                elif key == 'q' and not self.input_mode and not self.filter_mode:
+                    break
                 
                 elif key == '\x7f' or key == '\x08':  # Backspace
                     if self.filter_mode:
@@ -1003,77 +942,60 @@ exec {shell}
                     if self.filter_mode:
                         self.filter_text += key
                         self.selected_index = 0
-                    else:
-                        if not self.input_mode:
-                            self.input_mode = True
-                            self.input_buffer = ""
+                    elif self.input_mode:
                         self.input_buffer += key
+                    else:
+                        # Start input mode for any other key
+                        self.input_mode = True
+                        self.input_buffer = key
                     
             except KeyboardInterrupt:
                 break
             except Exception:
                 continue
     
-    def add_command(self, alias, command, cmd_type='link', description="", tags=None):
-        """Add a new command with enhanced features"""
+    def add_command(self, alias, command, cmd_type='link'):
+        """Add a new command with validation"""
         # Basic validation
         if not alias or not alias.strip():
-            print("\033[91m❌ Alias cannot be empty\033[0m")
+            self.set_flash_message("✗ Alias cannot be empty", error=True)
             return
             
         if not command or not command.strip():
-            print("\033[91m❌ Command cannot be empty\033[0m")
+            self.set_flash_message("✗ Command cannot be empty", error=True)
             return
             
         # Clean up alias and command
         alias = alias.strip()
         command = command.strip()
         
-        # Check for problematic characters in alias - FIXED REGEX
+        # Check for problematic characters in alias
         if not re.match(r'^[a-zA-Z0-9_-]+$', alias):
-            print("\033[91m❌ Alias can only contain letters, numbers, hyphens and underscores\033[0m")
+            self.set_flash_message("✗ Alias: only letters, numbers, - and _", error=True)
             return
         
         # Validate command
-        validated_command = self.validate_command(command)
-        if validated_command is None:
-            return
-        command = validated_command
+        command = self.validate_command(command)
         
+        # Check if exists
         if alias in self.commands:
-            cmd_data = self.commands[alias]
-            existing_type = cmd_data.get('type', 'link')
-            existing_emoji = "⛓️" if existing_type == 'chain' else "🔗"
-            print(f"\033[93m⚠️  Command '{alias}' already exists! {existing_emoji}\033[0m")
-            print(f"\033[37mCurrent: {cmd_data.get('command', '')}\033[0m")
-            response = input("\033[96mOverwrite? (y/N): \033[0m").lower()
+            # Quick confirmation
+            print(f"\n'{alias}' already exists. Overwrite? y/N: ", end='', flush=True)
+            response = self.get_key().lower()
             if response != 'y':
-                print("\033[37mCommand not added.\033[0m")
+                self.set_flash_message("Command not added")
                 return
-        
-        # Get additional details if not provided
-        if not description and not tags:
-            print("\033[94m📝 Optional: Add description and tags for better organization\033[0m")
-            description = input("\033[96mDescription (optional): \033[0m").strip()
-            tags_input = input("\033[96mTags (comma-separated, optional): \033[0m").strip()
-            tags = [tag.strip() for tag in tags_input.split(',') if tag.strip()] if tags_input else []
         
         self.commands[alias] = {
             "type": cmd_type,
             "command": command,
-            "description": description,
-            "tags": tags or [],
+            "description": "",
+            "tags": [],
             "created": datetime.now().isoformat()
         }
         self.save_commands()
         
-        emoji = "⛓️" if cmd_type == 'chain' else "🔗"
-        print(f"\033[92m✅ Added {cmd_type} '{alias}' {emoji}\033[0m")
-        if description:
-            print(f"\033[90m📝 {description}\033[0m")
-        if tags:
-            print(f"\033[90m🏷️  Tags: {', '.join(tags)}\033[0m")
-        print(f"\033[90m📁 Saved to: {self.config_file}\033[0m")
+        self.set_flash_message(f"✓ Added '{alias}'")
         
         # Reset selection to new command
         display_commands = self.get_filtered_commands()
@@ -1083,70 +1005,37 @@ exec {shell}
                 break
     
     def edit_command(self, alias):
-        """Edit an existing command interactively"""
+        """Edit an existing command"""
         if alias not in self.commands:
-            print(f"\033[91m❌ Command '{alias}' not found!\033[0m")
+            self.set_flash_message(f"✗ Command '{alias}' not found", error=True)
             return
         
         cmd_data = self.commands[alias]
         current_command = cmd_data.get('command', '')
-        current_description = cmd_data.get('description', '')
-        current_tags = cmd_data.get('tags', [])
-        cmd_type = cmd_data.get('type', 'link')
         
-        print(f"\033[94mEditing: {alias} ({cmd_type})\033[0m")
-        print(f"\033[90mCurrent command: {current_command}\033[0m")
-        if current_description:
-            print(f"\033[90mCurrent description: {current_description}\033[0m")
-        if current_tags:
-            print(f"\033[90mCurrent tags: {', '.join(current_tags)}\033[0m")
-        print()
+        # Simple inline edit
+        print(f"\nEdit '{alias}':")
+        print(f"Current: {current_command}")
+        print("New command (Enter to cancel): ", end='', flush=True)
         
-        # Edit command
-        new_command = input(f"\033[96mNew command (Enter to keep current): \033[0m").strip()
+        # Get new command
+        new_command = input().strip()
         if new_command:
-            validated_command = self.validate_command(new_command)
-            if validated_command is None:
-                print("\033[37mCommand not updated.\033[0m")
-                return
-            current_command = validated_command
-        
-        # Edit description
-        new_description = input(f"\033[96mDescription (Enter to keep current): \033[0m").strip()
-        if new_description:
-            current_description = new_description
-        
-        # Edit tags
-        print(f"\033[90mCurrent tags: {', '.join(current_tags) if current_tags else 'none'}\033[0m")
-        new_tags_input = input(f"\033[96mTags (comma-separated, Enter to keep current): \033[0m").strip()
-        if new_tags_input:
-            current_tags = [tag.strip() for tag in new_tags_input.split(',') if tag.strip()]
-        
-        # Update command
-        self.commands[alias].update({
-            'command': current_command,
-            'description': current_description,
-            'tags': current_tags
-        })
-        self.save_commands()
-        
-        emoji = "⛓️" if cmd_type == 'chain' else "🔗"
-        print(f"\033[92m✅ Updated '{alias}' {emoji}\033[0m")
+            self.commands[alias]['command'] = self.validate_command(new_command)
+            self.save_commands()
+            self.set_flash_message(f"✓ Updated '{alias}'")
+        else:
+            self.set_flash_message("Edit cancelled")
     
     def remove_command(self, alias):
-        """Remove a command"""
+        """Remove a command with minimal confirmation"""
         if alias not in self.commands:
-            print(f"\033[91m❌ Command '{alias}' not found!\033[0m")
+            self.set_flash_message(f"✗ Command '{alias}' not found", error=True)
             return
         
-        cmd_data = self.commands[alias]
-        cmd_type = cmd_data.get('type', 'link')
-        command = cmd_data.get('command', '')
-        emoji = "⛓️" if cmd_type == 'chain' else "🔗"
-        
-        print(f"\033[93m⚠️  Remove {cmd_type} '{alias}' {emoji}?\033[0m")
-        print(f"\033[37mCommand: {command}\033[0m")
-        response = input("\033[96mConfirm removal? (y/N): \033[0m").lower()
+        # Quick confirmation
+        print(f"\nRemove '{alias}'? y/N: ", end='', flush=True)
+        response = self.get_key().lower()
         
         if response == 'y':
             del self.commands[alias]
@@ -1158,51 +1047,14 @@ exec {shell}
             
             self.save_commands()
             self.save_stats()
-            print(f"\033[92m✅ Removed {cmd_type} '{alias}'\033[0m")
+            self.set_flash_message(f"✓ Removed '{alias}'")
             
             # Adjust selection if needed
             display_commands = self.get_filtered_commands()
             if self.selected_index >= len(display_commands):
                 self.selected_index = max(0, len(display_commands) - 1)
         else:
-            print("\033[37mCommand not removed.\033[0m")
-    
-    def create_from_template(self, template_name, alias):
-        """Create a command from a template"""
-        if template_name not in COMMAND_TEMPLATES:
-            print(f"\033[91m❌ Template '{template_name}' not found!\033[0m")
-            print(f"\033[37mAvailable templates: {', '.join(COMMAND_TEMPLATES.keys())}\033[0m")
-            return
-        
-        template = COMMAND_TEMPLATES[template_name]
-        command_template = template['template']
-        placeholders = template['placeholders']
-        
-        print(f"\033[94m🎨 Creating command from template: {template_name}\033[0m")
-        print(f"\033[90m{template['description']}\033[0m")
-        print(f"\033[90mTemplate: {command_template}\033[0m")
-        print()
-        
-        # Get values for placeholders
-        placeholder_values = {}
-        for placeholder in placeholders:
-            value = input(f"\033[96m{placeholder}: \033[0m").strip()
-            if not value:
-                print("\033[37mTemplate creation cancelled.\033[0m")
-                return
-            placeholder_values[placeholder] = value
-        
-        # Replace placeholders
-        final_command = command_template
-        for placeholder, value in placeholder_values.items():
-            final_command = final_command.replace(f"{{{placeholder}}}", value)
-        
-        print(f"\033[90mFinal command: {final_command}\033[0m")
-        response = input("\033[96mCreate this command? (Y/n): \033[0m").lower()
-        
-        if response != 'n':
-            self.add_command(alias, final_command, 'chain' if '&&' in final_command else 'link', 
-                           template['description'], [template_name])
+            self.set_flash_message("Remove cancelled")
     
     def export_commands(self, filename):
         """Export commands to a file"""
@@ -1210,20 +1062,20 @@ exec {shell}
             export_data = {
                 'commands': dict(self.commands),
                 'exported_at': datetime.now().isoformat(),
-                'version': '1.0.0'
+                'version': '2.0.0'
             }
             
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, indent=2, ensure_ascii=False)
             
-            print(f"\033[92m✅ Exported {len(self.commands)} commands to {filename}\033[0m")
+            self.set_flash_message(f"✓ Exported {len(self.commands)} commands")
         except Exception as e:
-            print(f"\033[91m❌ Export failed: {e}\033[0m")
+            self.set_flash_message(f"✗ Export failed: {e}", error=True)
     
     def import_commands(self, filename):
         """Import commands from a file"""
         if not os.path.exists(filename):
-            print(f"\033[91m❌ File '{filename}' not found!\033[0m")
+            self.set_flash_message(f"✗ File '{filename}' not found", error=True)
             return
         
         try:
@@ -1236,20 +1088,14 @@ exec {shell}
             else:
                 imported_commands = data
             
-            print(f"\033[94mImporting {len(imported_commands)} commands from {filename}\033[0m")
-            
-            conflicts = []
-            for alias in imported_commands:
-                if alias in self.commands:
-                    conflicts.append(alias)
+            # Quick conflict check
+            conflicts = [alias for alias in imported_commands if alias in self.commands]
             
             if conflicts:
-                print(f"\033[93m⚠️  {len(conflicts)} commands already exist: {', '.join(conflicts[:5])}")
-                if len(conflicts) > 5:
-                    print(f"    ... and {len(conflicts) - 5} more")
-                response = input("\033[96mOverwrite existing commands? (y/N): \033[0m").lower()
+                print(f"\n{len(conflicts)} conflicts found. Overwrite? y/N: ", end='', flush=True)
+                response = self.get_key().lower()
                 if response != 'y':
-                    print("\033[37mImport cancelled.\033[0m")
+                    self.set_flash_message("Import cancelled")
                     return
             
             # Import commands
@@ -1274,10 +1120,10 @@ exec {shell}
                 imported_count += 1
             
             self.save_commands()
-            print(f"\033[92m✅ Imported {imported_count} commands successfully\033[0m")
+            self.set_flash_message(f"✓ Imported {imported_count} commands")
             
         except Exception as e:
-            print(f"\033[91m❌ Import failed: {e}\033[0m")
+            self.set_flash_message(f"✗ Import failed: {e}", error=True)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1295,19 +1141,21 @@ def main():
         if args.command in launcher.commands:
             launcher.run_command_and_exit(args.command)
         else:
-            print(f"\033[91m❌ Command '{args.command}' not found!\033[0m")
+            print(f"✗ Command '{args.command}' not found")
             available = list(launcher.commands.keys())
             if available:
-                print(f"\033[37mAvailable commands: {', '.join(available)}\033[0m")
+                print(f"Available: {', '.join(available[:5])}")
+                if len(available) > 5:
+                    print(f"... and {len(available) - 5} more")
             else:
-                print("\033[37mNo commands saved. Run 'ql' to add some.\033[0m")
+                print("No commands saved. Run 'ql' to add some.")
             sys.exit(1)
     else:
         # Interactive mode
         try:
             launcher.interactive_mode()
         except KeyboardInterrupt:
-            print("\n\033[96m👋 Goodbye!\033[0m")
+            print("\n")
 
 if __name__ == "__main__":
     main()
