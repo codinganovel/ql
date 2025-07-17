@@ -1,5 +1,67 @@
 # ql.py — original v0.1
 
+## v0.3 – 2025-07-17
+### ➕ Added
+**Modular Architecture Refactor**
+- Complete rewrite with class-based modular architecture
+- New classes: `UIManager`, `CommandManager`, `TemplateManager`, `QLLauncher`
+- Better separation of concerns and maintainability
+
+**Dual-Mode Interface**
+- New dual-mode navigation system (command mode + template mode)
+- `Ctrl+T` hotkey to seamlessly switch between modes
+- Mode-specific interfaces with tailored navigation
+- Mode state persistence during navigation sessions
+
+**Usage Statistics and Optimization**
+- Usage tracking system (`~/.local/bin/.qlstats`)
+- Command usage counters and last-used timestamps
+- Statistics display showing command counts, types, and usage
+- Command optimization based on usage patterns
+
+**Enhanced UI and Navigation**
+- Safe string truncation (`safe_truncate()`) to prevent crashes from long commands
+- Improved screen clearing with better terminal compatibility
+- Enhanced keyboard handling with cross-platform arrow key support
+- Real-time preview system with toggle capability (`p` key)
+- Inline preview mode showing command/template details below selections
+
+**Advanced Search and Filtering**
+- Combined fuzzy matching (substring + character-in-order matching)
+- Multi-field search across commands, descriptions, tags, and templates
+- Real-time filter feedback with match count display
+- Enhanced filter mode with better visual indicators
+
+**Extended Keyboard Shortcuts for templates as well**
+- `d` - Dry run preview
+- `c` - Copy to clipboard
+- `p` - Toggle preview on/off
+- `e` - Edit selected item
+- `r` - Remove selected item
+- `Ctrl+T` - Switch between modes
+- Number keys (1-9) for quick selection
+
+### 🔄 Changed
+**Complete Architectural Overhaul**
+- Transformed from monolithic structure to modular class-based design
+- Enhanced template navigation with dedicated template mode
+- Improved command management with in-place updates
+- Better command validation and alias checking
+- Enhanced template preview system with dry-run capabilities
+
+**User Experience Improvements**
+- Significantly improved cross-platform compatibility
+- Better terminal handling across different platforms
+- Enhanced keyboard input with proper escape sequence handling
+- Improved error recovery for platform-specific issues
+
+### 🐛 Fixed
+- Fixed crashes from extremely long commands with safe string handling
+- Improved error handling for edge cases
+- Enhanced dangerous command detection patterns
+- Better command validation and typo detection
+- More robust terminal compatibility across platforms
+
 ## v0.2 – 2025-06-28 00:57
 ### ➕ Added
 L55 Introduced self.templates_file, pointing to a per-user .qltemplates file for saved command templates. 
