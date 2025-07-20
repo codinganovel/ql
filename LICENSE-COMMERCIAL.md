@@ -1,4 +1,4 @@
-#Coffee Commercial License
+# Coffee Commercial License
 
 Copyright (c) 2025 Sam Jamshidi Larijani
 Permission is hereby granted, upon payment of the required license fee, to any legal entity with a net worth, market cap, or enterprise value of above USD $ 500,000,000 obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so.
