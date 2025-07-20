@@ -99,6 +99,6 @@ Pull requests welcome. Open an issue or suggest an idea.
 
 ## 📄 License
 
-MIT
+under ☕️, check out [the-coffee-license](https://github.com/codinganovel/The-Coffee-License)
 
 > built by **Sam** with ☕️&❤️
