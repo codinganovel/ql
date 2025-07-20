@@ -10,7 +10,7 @@ do so.
 
 Any legal entity with a net worth, market capitalization, or enterprise value of USD $ 500,000,000 or
 above must obtain a commercial license (Fee: USD $ 50) prior to use.
-Contact {email}
+Contact : wow@sammakes.art
 
 This license is subject to the following conditions:
 
