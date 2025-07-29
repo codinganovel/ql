@@ -706,8 +706,8 @@ class QLLauncher:
         # Force QL to always run from root directory for maximum cd compatibility
         os.chdir('/')
         
-        # Ensure ~/.local/bin exists
-        self.config_dir = Path.home() / '.local' / 'bin'
+        # Use proper config directory location
+        self.config_dir = Path.home() / '.config' / 'ql'
         self.config_dir.mkdir(parents=True, exist_ok=True)
         
         # Clean up any leftover scripts from previous sessions
